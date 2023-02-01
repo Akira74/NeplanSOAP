@@ -1,19 +1,24 @@
 #-------------------------------------------------------------------------------
-# Name:         Neplan 10 WS
-# Purpose:      Python wrapper around Neplan 10 webservice
+# Name:             Neplan 10 WS
+# Purpose:          Python wrapper around Neplan 10 webservice
 #
-# Author:      kristjan.vilgo
-#
-# Created:     07.02.2019
-# Copyright:   (c) kristjan.vilgo 2019
-# Licence:     GPLv2
+# Author:           kristjan.vilgo
+# Author            Martin Heller (additions and corrections
+# Version:          0.2
+# Date:             20.01.2023
+# Licence:          GPLv2
 #-------------------------------------------------------------------------------
 from __future__ import print_function
 
 import inspect
 import re
+import os
+#Parse Arguments
+import argparse
 
-from pathlib import Path
+import sys
+
+import pathlib
 
 #from hashlib import md5 # Before Neplan 10.8.2.0
 from hashlib import sha1
@@ -22,6 +27,7 @@ from uuid import uuid4
 from zeep import Transport, Client, settings
 from zeep.wsse import UsernameToken
 from zeep.plugins import HistoryPlugin
+from zeep.exceptions import Fault
 
 from requests import Session
 from lxml import etree
@@ -48,12 +54,25 @@ pandas.set_option("display.width", 1500)
 
 
 # --- FUNCTIONS ---
+def importFiles(args):
+    print(args.u)
+
+#Crypt a password and print it for later use
+
+def cryptPassword(password):
+    # Create crypto container for password
+    crypted_container = sha1()
+    crypted_container.update(password.encode())
+    crypted_password = crypted_container.hexdigest()
+    print("Copy below SHA1 Hash for later use in Service for Auth")
+    print(crypted_password)
 
 class NeplanService():
 
     # HELPER FUNCTIONS - START
 
-    def __init__(self, server, username, password, debug = False):
+    #def __init__(self, server, username, password, debug = False):
+    def __init__(self, server, username, crypted_password, debug = False):
         """Sets up the Neplan SOAP WS and retuns the service object
         use service.history to get last sent and received raw SOAP messages"""
 
@@ -61,11 +80,6 @@ class NeplanService():
         self.server = server
         self.debug  = debug
 
-        # Create crypto container for password
-        #crypted_container = md5() # Before Neplan 10.8.2.0
-        crypted_container = sha1()
-        crypted_container.update(password.encode())
-        crypted_password = crypted_container.hexdigest()
 
         # Suppress certificate validation
         session = Session()
@@ -83,12 +97,13 @@ class NeplanService():
 
         client = Client(wsdl, transport=transport, wsse=wsse, plugins=[self.history])
         self.client = client
+        self.wsdl = client.wsdl
         client.debug = debug # Only on Kristjan machine this has effect (prints out all sent and recived messages, direct modification to zeep libary)
 
         service = client.create_service('{http://www.neplan.ch/Web/External}BasicHttpBinding_NeplanService', '{}/Services/External/NeplanService.svc/basic'.format(server))
-
+        get_type = client.get_type
         self.service = service
-
+        self.get_type = get_type
         if debug:
             print("INFO - Service created to {}".format(server))
 
@@ -282,17 +297,17 @@ class NeplanService():
         """Returns all elements of given project in a dataframe, with columns [ID, CIM_ID, EIC_ID, NAME, TYPE]"""
 
         # Get all element data
-        CIM_ID_dict = self.service.GetNeplanIDtoCimIDDictionary(project)
-        EIC_ID_dict = self.service.GetNeplanIDtoEICodeDictionary(project)
+        #CIM_ID_dict = self.service.GetNeplanIDtoCimIDDictionary(project)
+        #EIC_ID_dict = self.service.GetNeplanIDtoEICodeDictionary(project)
         Name_Type_dict = self.service.GetAllElementsOfProject(project, {}, {})
-
+        CIM_ID=[]
         # Parse and merge all the data
-        CIM_ID = pandas.DataFrame([(item.Key, item.Value) for item in CIM_ID_dict], columns=["ID", "CIM_ID"])
-        EIC_ID = pandas.DataFrame([(item.Key, item.Value) for item in EIC_ID_dict], columns=["ID", "EIC_ID"])
+        #CIM_ID = pandas.DataFrame([(item.Key, item.Value) for item in CIM_ID_dict], columns=["ID", "CIM_ID"])
+        #EIC_ID = pandas.DataFrame([(item.Key, item.Value) for item in EIC_ID_dict], columns=["ID", "EIC_ID"])
         NAME = pandas.DataFrame([(item.Key, item.Value) for item in Name_Type_dict.elementNames.KeyValueOfstringstring], columns=["ID", "NAME"])
         TYPE = pandas.DataFrame([(item.Key, item.Value) for item in Name_Type_dict.elementTypes.KeyValueOfstringstring], columns=["ID", "TYPE"])
 
-        return CIM_ID.merge(EIC_ID, on='ID').merge(NAME, on='ID').merge(TYPE, on='ID')
+        return NAME.merge(NAME, on='ID').merge(TYPE, on='ID')
 
     def GetAnalysisResultFile(self, fileName):
         """Retruns analysis result file defined in: analysis_result.ResultFilename
@@ -339,6 +354,22 @@ class NeplanService():
 
         return project
 
+    def GetProjects(self):
+
+        """Gets a project based on the name
+           GetProject(projectName: xsd:string, variantName: xsd:string, diagramName: xsd:string, layerName: xsd:string) -> GetProjectResult: ns2:ExternalProject"""
+
+        if self.debug:
+            print("INFO - Getting all projects")
+
+        projects = self.service.GetProjects()
+
+        if projects is None :
+
+            print(locals())
+            print('ERROR - ')
+
+        return projects
 
     def GetLogFileAsList(self, print_log=False):
         """Returns whole user activity logfile as a list"""
@@ -443,8 +474,9 @@ class NeplanService():
 
 
         if results_xml:
+            print("XML Result File received")
+            #results_xml = etree.fromstring(results_xml)
 
-            results_xml = etree.fromstring(results_xml)
 
         else:
             project_logon_url = self.GetLogOnUrlWithProject(project)
@@ -493,7 +525,7 @@ class NeplanService():
         if BoundaryPath:
             with open(BoundaryPath, "rb") as file_object:
 
-                print(f"Uploading boundary to Neplan {BoundaryPath}")
+                print("Uploading boundary to Neplan")
                 BoundaryPath = self.service.ZipUpload(stream=file_object.read())
                 print(BoundaryPath)
 
@@ -544,33 +576,37 @@ class NeplanService():
         else:
             return True
 
-    def CIMImport_from_files(self, inputFiles, projectName=None, isLocalPath=False):
-        """Import CIM files to Neplan from local path"""
 
+    def Import_from_List_files(self, inputFiles, projectName=None):
+        """Import NeplanList Files to Neplan from local path"""
         # If no project name has been provided, create one automatically based on first provided filename
-        if not projectName:
-            projectName = f"{inputFiles[0]}_{uuid4()}"
+        file_path = Path(inputFiles)
+        print(f'Importing to {projectName} file {inputFiles}.')
+        if file_path.exists():
+            with file_path.open("rb") as file_object:
+                response_filename=self.service.XMLUpload(stream=file_object.read())
+                print(f"Filename {response_filename}")
 
-        uploded_files = []
-        for file_path_string in inputFiles:
-            file_path = Path(file_path_string)
-            print(f"Importing to {projectName} file {file_path_string}")
+                try:
+                     response = self.service.ImportFromListFile(uploadName=response_filename, projectName="Test_so_doof", copySettingsFromProjectName="test")
+                except Fault as fault:
+                    parsed_fault_detail = self.wsdl.types.deserialize(fault.detail[0])
+                    print(parsed_fault_detail)
+                    print("test")
+                    self.print_last_messageexchange()
 
-            if file_path.exists():
-                with file_path.open("rb") as file_object:
-                    uploded_files.append(self.service.ZipUpload(stream=file_object.read()))
-            else:
-                print(f"Could not find {file_path}")
-
-        response = self.service.CIMImport(inputFiles={"string": uploded_files},
-                                          isLocalPath=isLocalPath,
-                                          projectName=projectName,
-                                          userName=self.username)
-
-
+        else:
+            #print(f"Could not find {file_path}.")
+            response = "ERROR"
         return response
+        
 
-
+    def DeleteMarkedAdDeletedProject(self):
+        """Delete Delete all the own projects marked as deleted.
+        As and admin all the projects marked as deleted will be deleted 
+        return = Number of deleted projects"""
+        response = self.service.DeleteMarkedAdDeletedProject()
+        return response
 
     def CIMImport(self, projectName, inputFiles, isLocalPath=False):
         """Import CIM files to Neplan"""
@@ -584,47 +620,122 @@ class NeplanService():
         return response
 
 
-
 if __name__ == "__main__":
+    """Readout Argument List"""
+    argParser = argparse.ArgumentParser()
+    subparsers = argParser.add_subparsers(dest='mode')
+    #Config für File Import
+    parser_import = subparsers.add_parser('importFiles', help='Import Modus')
+    parser_import.add_argument("-w", "--webSer", help="WebService Adress", required=True)
+    parser_import.add_argument("-u", "--user", help="Username", required=True)
+    parser_import.add_argument("-p", "--passwd", help="Password, as SHA1 Passphrase use crypt to encode password", required=True)
+    parser_import.add_argument("-i", "--ifile", help="Input File", required=True)
+    parser_import.add_argument("-L", "--ListFile", help="Input CSV Filelist for Import or analysis")
+    #Config für LoadFlow Analyse
+    parser_flow = subparsers.add_parser('LoadFlow', help='Do Loadflow Analysis')
+    parser_flow.add_argument("-w", "--webSer", help="WebService Adress", required=True)
+    parser_flow.add_argument("-u", "--user", help="Username", required=True)
+    parser_flow.add_argument("-p", "--passwd", help="Password, as SHA1 Passphrase use crypt to encode password", required=True)
+    parser_flow.add_argument("-n", "--project", help="Project Name that has to be analyzed", required=True)
+    parser_flow.add_argument("-o", "--outputDir", help="Output location of the Analyze XML file and result", required=True)
+    #Config für einzelene Befehle die ausgeführt werden sollen
+    parser_single = subparsers.add_parser('Single', help='Do a single Command')
+    parser_single.add_argument("-w", "--webSer", help="WebService Adress", required=True)
+    parser_single.add_argument("-u", "--user", help="Username", required=True)
+    parser_single.add_argument("-p", "--passwd", help="Password, as SHA1 Passphrase use crypt to encode password", required=True)
+    parser_single.add_argument("-c", "--command", help="defines the Single Command", required=True)
+    parser_crypt = subparsers.add_parser('crypt', help='Crypt the password for later use in Service')
+    parser_crypt.add_argument("-p", "--password", help="Password that should be cryptes as SHA", required=True)
+
+
+    args = argParser.parse_args()
+    #Open Neplan Web Service
+    print(args.mode)
+    if args.mode == 'importFiles' :
+        #Upload the File
+        print(args.mode)
+        api = NeplanService(args.webSer, args.user, args.passwd, debug=True)
+        upload_response = api.Import_from_List_files(args.ifile, "TEST_IMPORT_PYTHON")
+        sys.stdout.write('Noch was zu tun')
+        sys.exit(0)
+    elif args.mode == 'crypt' :
+        #Crypt a Password
+        cryptPassword(args.password)
+
+    elif args.mode == 'LoadFlow' :
+        """Do LoadFlow Analysis of a project"""
+        #Check if output Path exist
+        
+        if not os.path.isdir(args.outputDir):
+            print(f"Output Path does not exist or is not a path {args.outputDir} !!!")
+            sys.exit(1)
+        else:
+            if not os.path.exists(args.outputDir):
+                print(f"Output Path does not exist {args.outputDir} !!!")
+                sys.exit(1)
+            else:
+                api = NeplanService(args.webSer, args.user, args.passwd, debug=True)
+                analysisReferenceID = str(uuid4())
+                analysisResult = api.run_loadflow(args.project)
+                ##Get XML Analyse File and write to project folder
+                xmlResult = analysisResult[0]
+                OutputXMLCalcFile = pathlib.PurePath(args.outputDir, "CalculationResult.xml")
+                print(f"Writing {OutputXMLCalcFile}")
+                xmlFile = open(OutputXMLCalcFile, "wb")
+                xmlFile.write(xmlResult)
+                sys.exit(0)
+    elif args.mode == 'Single' :
+    # Test for single commands
+        api = NeplanService(args.webSer, args.user, args.passwd, debug=True)
+        if args.command == 'getProjects':
+            ##get all projects and show them
+            allProjects = api.GetProjects()
+            print(allProjects)
+        elif args.command == 'DeleteMarked':
+            deletedProjects = api.DeleteMarkedAdDeletedProject()
+            print(f"Anzahl der gelöschten Projekte ist {deletedProjects}.")
+        else:
+            print("NIX Definiert")
+    else:
+        print ("TEST")
+
+
+"""Test Code from old project... to be edited"""
+#upload_response = api.Import_from_List_files(args.ifile, "TEST_IMPORT_PYTHON")
+#   print(upload_response)
+#   project = api.GetProject(upload_response.actualCreatedProjectName)
+#   sys.exit()
 
 
 
-    api = NeplanService(server, username, password, debug=True)
+#    model_name = f"Elering_EMS_BaseModel_{datetime.now():%Y%m%dT%H%M}"
 
-    model_name = f"Elering_EMS_BaseModel_{datetime.now():%Y%m%dT%H%M}"
 
-    upload_response = api.CIMImport_from_files([r"C:\Users\kristjan.vilgo\Documents\GitHub\USVDM\Tools\RDF_PARSER\examples\Export.zip"], model_name)
+#    project = api.GetProject(upload_response.actualCreatedProjectName)
 
-    project = api.GetProject(upload_response.actualCreatedProjectName)
-
-    lf_result = api.service.AnalyseVariant(project, analysisModule="LoadFlow", analysisReferenceID=str(uuid4()))
+#    lf_result = api.service.AnalyseVariant(project, analysisModule="LoadFlow", analysisReferenceID=str(uuid4()))
 
     #download_response = api.CIMExport(project=project, file_path=f"{model_name}.zip", )
 
-    validation_response = api.service.ValidateCGMESModel(externalProject=project, tsoName="Elering")
+#    validation_response = api.service.ValidateCGMESModel(externalProject=project, tsoName="Elering")
 
-    download_response = api.CIMExport(
-        project=project,
-        file_path=f"{model_name}.zip",
-        Period="YR",
-        MAS="http://www,elering.ee/OperationalPlanning",
-        Version="001",
-        ScenarioDateTime=aniso8601.parse_datetime("2023-10-18T08:30"),
+#    download_response = api.CIMExport(
+#        project=project,
+#        file_path=f"{model_name}.zip",
+#        Period="YR",
+#        MAS="http://www,elering.ee/OperationalPlanning",
+#        Version="001",
+#        ScenarioDateTime=aniso8601.parse_datetime("2023-10-18T08:30"),
         #BoundaryPath=r"C:\Users\kristjan.vilgo\Downloads\20220902T0000Z__ENTSOE_BD_001\20220902T0000Z__ENTSOE_BD_001.zip",
-        BoundaryPath=r"\\elering.sise\teenused\NMM\data\ACG\BOUNDARY\20190624T0000Z__ENTSOE_BD_001.zip",
+#        BoundaryPath=r"\\elering.sise\teenused\NMM\data\ACG\BOUNDARY\20190624T0000Z__ENTSOE_BD_001.zip",
         #AreasToExportNames=["Estonia"],
-        ExportBoundary=True)
+#        ExportBoundary=True)
 
 
-
-
-
-    #project = api.GetProject("LoadFlow")
-
-    #elements = api.GetAllElementsOfProject(project)
-    #print(elements)
-    #print("INFO - Elements count in project:")
-    #print(elements.TYPE.value_counts())
+#    elements = api.GetAllElementsOfProject(project)
+#    print(elements)
+#    print("INFO - Elements count in project:")
+#    print(elements.TYPE.value_counts())
 
 
     # api.service.CIMImport
@@ -640,7 +751,3 @@ if __name__ == "__main__":
     #api.CIMExport(project)
 
     #python - mzeep < wsdl >
-
-
-
-
